@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  chatbot:
+    build: .
+    container_name: hkbu-chatbot
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_ACCESS_TOKEN=${TELEGRAM_ACCESS_TOKEN}
+      - CHATGPT_BASIC_URL=${CHATGPT_BASIC_URL}
+      - CHATGPT_MODEL_NAME=${CHATGPT_MODEL_NAME}
+      - CHATGPT_API_VERSION=${CHATGPT_API_VERSION}
+      - CHATGPT_ACCESS_TOKEN=${CHATGPT_ACCESS_TOKEN}
+      - FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+      - FIREBASE_PRIVATE_KEY_ID=${FIREBASE_PRIVATE_KEY_ID}
+      - FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
+      - FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+      - FIREBASE_CLIENT_ID=${FIREBASE_CLIENT_ID}
+      - FIREBASE_CLIENT_CERT_URL=${FIREBASE_CLIENT_CERT_URL}
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3" 
