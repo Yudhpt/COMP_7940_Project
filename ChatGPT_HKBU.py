@@ -1,26 +1,33 @@
-# 导入必要的库
-import os  # 用于读取环境变量
-import requests  # 用于发送HTTP请求
-import json  # 用于处理JSON数据
-import configparser  # 用于读取配置文件
-from pathlib import Path  # 用于处理文件路径
+# Import necessary libraries
+import os  # For reading environment variables
+import requests  # For sending HTTP requests
+import json  # For handling JSON data
+from configparser import RawConfigParser  # For reading configuration files
+from pathlib import Path  # For handling file paths
+import firebase_admin  # For Firebase
+from firebase_admin import credentials, firestore  # For Firestore
+from typing import List, Dict, Any
 
 class HKBU_ChatGPT():
-    def __init__(self):
+    def __init__(self, db=None):
         """
-        初始化ChatGPT类
-        从环境变量或配置文件获取配置信息
+        Initialize ChatGPT class
+        Get configuration from environment variables or config file
+        :param db: Firestore database instance (optional)
         """
-        # 加载配置
+        # Load configuration
         config = self._load_config()
         
-        # 设置ChatGPT配置
+        # Set ChatGPT configuration
         self.basic_url = config['basic_url']
         self.model_name = config['model_name']
         self.api_version = config['api_version']
         self.access_token = config['access_token']
         
-        # 验证必要的配置是否已设置
+        # Set Firestore database instance
+        self.db = db
+        
+        # Validate required configurations
         required_configs = [
             'basic_url',
             'model_name',
@@ -30,19 +37,19 @@ class HKBU_ChatGPT():
         
         missing_configs = [config for config in required_configs if not getattr(self, config)]
         if missing_configs:
-            raise ValueError(f"缺少必要的配置: {', '.join(missing_configs)}")
+            raise ValueError(f"Missing required configurations: {', '.join(missing_configs)}")
     
     def _load_config(self):
         """
-        加载配置，优先使用环境变量，如果环境变量不存在则使用配置文件
+        Load configuration, prioritize environment variables, fall back to config file
         """
-        config = configparser.ConfigParser()
+        config = RawConfigParser()
         config_path = Path('config.ini')
         
         if config_path.exists():
             config.read('config.ini')
         
-        # 获取配置，优先使用环境变量
+        # Get configuration, prioritize environment variables
         return {
             'basic_url': os.getenv('CHATGPT_BASIC_URL') or config.get('CHATGPT', 'BASICURL', fallback=None),
             'model_name': os.getenv('CHATGPT_MODEL_NAME') or config.get('CHATGPT', 'MODELNAME', fallback=None),
@@ -52,51 +59,138 @@ class HKBU_ChatGPT():
             
     def submit(self, message):
         """
-        向ChatGPT API提交消息并获取回复
-        :param message: 用户输入的消息
-        :return: ChatGPT的回复或错误信息
+        Submit message to ChatGPT API and get reply
+        :param message: User input message
+        :return: ChatGPT reply or error message
         """
-        # 构建对话内容
+        # Build conversation content
         conversation = [{"role": "user", "content": message}]
         
-        # 构建API请求URL
+        # Build API request URL
         url = f"{self.basic_url}/deployments/{self.model_name}/chat/completions/?api-version={self.api_version}"
                 
-        # 设置请求头
+        # Set request headers
         headers = {
             'Content-Type': 'application/json',
             'api-key': self.access_token
         }
         
-        # 设置请求体
+        # Set request body
         payload = { 'messages': conversation }
         
-        # 发送POST请求
+        # Send POST request
         response = requests.post(url, json=payload, headers=headers)
         
-        # 处理响应
+        # Handle response
         if response.status_code == 200:
-            # 如果请求成功，返回ChatGPT的回复
+            # If request successful, return ChatGPT reply
             data = response.json()
             return data['choices'][0]['message']['content']
         else:
-            # 如果请求失败，返回错误信息
-            return f'错误: {response.status_code} - {response.text}'
+            # If request failed, return error message
+            return f'Error: {response.status_code} - {response.text}'
+    
+    def search_similar_activities(self, user_interests: List[str], category: str = None) -> List[Dict[str, Any]]:
+        """
+        Search for similar activities in Firestore based on user interests
+        :param user_interests: List of user interests
+        :param category: Optional category filter
+        :return: List of matching activities
+        """
+        if not self.db:
+            print("Firestore database not initialized")
+            return []
+            
+        try:
+            activities_ref = self.db.collection('Activities')
+            
+            # Build query
+            query = activities_ref
+            
+            # Add category filter if provided
+            if category:
+                query = query.where('category', '==', category)
+            
+            # Get all activities
+            activities = query.stream()
+            
+            # Convert to list of dictionaries
+            activities_list = [activity.to_dict() for activity in activities]
+            
+            # Filter activities based on keywords matching user interests
+            matching_activities = []
+            for activity in activities_list:
+                # Check if any keyword matches user interests
+                if any(keyword.lower() in [interest.lower() for interest in user_interests] 
+                      for keyword in activity.get('keywords', [])):
+                    matching_activities.append(activity)
+            
+            return matching_activities
+            
+        except Exception as e:
+            print(f"Error searching activities: {str(e)}")
+            return []
+    
+    def get_activity_recommendations(self, user_message: str) -> str:
+        """
+        Get activity recommendations based on user message
+        :param user_message: User's message about activities they're interested in
+        :return: Formatted response with recommendations
+        """
+        if not self.db:
+            return "Sorry, I cannot access the activity database at the moment."
+            
+        try:
+            # First, analyze user interests from the message
+            user_interests = self.analyze_user_interests({"message": user_message})
+            
+            # Extract interests and category if mentioned
+            interests = user_interests.get("main_interests", [])
+            category = None
+            if "category" in user_interests:
+                category = user_interests["category"]
+            
+            # Search for similar activities in Firestore
+            matching_activities = self.search_similar_activities(interests, category)
+            
+            if matching_activities:
+                # Format the response with matching activities
+                response = "Here are some activities that might interest you:\n\n"
+                for activity in matching_activities:
+                    response += f"📌 {activity['name']}\n"
+                    response += f"📝 {activity['description']}\n"
+                    response += f"🔗 {activity['link']}\n\n"
+                return response
+            else:
+                # If no matches found, use ChatGPT to generate recommendations
+                prompt = f"""
+                Based on the following user interests, suggest some activities:
+                Interests: {', '.join(interests)}
+                Category: {category if category else 'Any'}
+                
+                Please provide a list of suggested activities with descriptions and links.
+                """
+                return self.submit(prompt)
+                
+        except Exception as e:
+            print(f"Error getting recommendations: {str(e)}")
+            return "I apologize, but I encountered an error while processing your request. Please try again later."
     
     def analyze_user_interests(self, user_data):
         """
-        分析用户兴趣
-        :param user_data: 用户数据字典
-        :return: 分析结果
+        Analyze user interests
+        :param user_data: User data dictionary
+        :return: Analysis results
         """
         prompt = f"""
-        请分析以下用户数据，提取用户的主要兴趣和偏好：
+        Please analyze the following user data and extract main interests and preferences:
         {json.dumps(user_data, ensure_ascii=False, indent=2)}
         
-        请以JSON格式返回分析结果，包含以下字段：
-        - main_interests: 主要兴趣列表
-        - preferences: 偏好描述
-        - potential_activities: 可能感兴趣的活动列表
+        Please return the analysis results in JSON format with the following fields:
+        - main_interests: List of main interests
+        - preferences: Description of preferences
+        - category: Activity category if mentioned (e.g., "Online Gaming", "Virtual Reality", "Social Media")
+        - potential_activities: List of potentially interesting activities
         """
         
         response = self.submit(prompt)
@@ -105,30 +199,31 @@ class HKBU_ChatGPT():
         except json.JSONDecodeError:
             return {
                 "main_interests": [],
-                "preferences": "无法解析兴趣分析结果",
+                "preferences": "Unable to parse interest analysis results",
+                "category": None,
                 "potential_activities": []
             }
     
     def generate_recommendations(self, user_interests, available_activities):
         """
-        生成活动推荐
-        :param user_interests: 用户兴趣分析结果
-        :param available_activities: 可用活动列表
-        :return: 推荐活动列表
+        Generate activity recommendations
+        :param user_interests: User interest analysis results
+        :param available_activities: List of available activities
+        :return: List of recommended activities
         """
         prompt = f"""
-        基于以下用户兴趣和可用活动，生成个性化推荐：
+        Based on the following user interests and available activities, generate personalized recommendations:
         
-        用户兴趣分析：
+        User interest analysis:
         {json.dumps(user_interests, ensure_ascii=False, indent=2)}
         
-        可用活动：
+        Available activities:
         {json.dumps(available_activities, ensure_ascii=False, indent=2)}
         
-        请返回一个JSON格式的推荐列表，每个推荐包含：
-        - activity_name: 活动名称
-        - match_score: 匹配度（0-100）
-        - reason: 推荐理由
+        Please return a JSON list of recommendations, each containing:
+        - activity_name: Activity name
+        - match_score: Match score (0-100)
+        - reason: Recommendation reason
         """
         
         response = self.submit(prompt)
@@ -138,33 +233,44 @@ class HKBU_ChatGPT():
             return []
         
 if __name__ == '__main__':
-    # 测试代码
-    ChatGPT_test = HKBU_ChatGPT()
-    
-    # 测试用户兴趣分析
-    test_user_data = {
-        "name": "张三",
-        "age": 25,
-        "interests": ["编程", "摄影", "旅行"],
-        "recent_activities": ["参加编程比赛", "摄影展览"],
-        "preferences": {
-            "outdoor_activities": True,
-            "group_activities": True,
-            "learning_new_skills": True
+    # Test code
+    try:
+        # Initialize Firebase for testing
+        if not firebase_admin._apps:
+            cred = credentials.Certificate("serviceAccountKey.json")
+            firebase_admin.initialize_app(cred)
+        test_db = firestore.client()
+        
+        # Initialize ChatGPT with database
+        ChatGPT_test = HKBU_ChatGPT(test_db)
+        
+        # Test basic conversation
+        test_message = "Hello, how are you?"
+        print("Testing basic conversation:")
+        response = ChatGPT_test.submit(test_message)
+        print(f"User: {test_message}")
+        print(f"ChatGPT: {response}")
+        
+        # Test activity search
+        print("\nTesting activity search:")
+        activities = ChatGPT_test.search_similar_activities(["gaming", "VR"])
+        print(f"Found {len(activities)} matching activities")
+        for activity in activities[:2]:  # Print first 2 activities
+            print(f"- {activity['name']}")
+        
+        # Test activity recommendations
+        print("\nTesting activity recommendations:")
+        test_interests = {
+            "name": "John",
+            "age": 25,
+            "interests": ["gaming", "VR", "social"],
+            "preferences": {
+                "online_activities": True,
+                "group_activities": True
+            }
         }
-    }
-    
-    print("测试用户兴趣分析：")
-    interests = ChatGPT_test.analyze_user_interests(test_user_data)
-    print(json.dumps(interests, ensure_ascii=False, indent=2))
-    
-    # 测试活动推荐
-    test_activities = [
-        {"name": "编程工作坊", "type": "学习", "difficulty": "中级"},
-        {"name": "摄影比赛", "type": "艺术", "difficulty": "初级"},
-        {"name": "户外徒步", "type": "运动", "difficulty": "初级"}
-    ]
-    
-    print("\n测试活动推荐：")
-    recommendations = ChatGPT_test.generate_recommendations(interests, test_activities)
-    print(json.dumps(recommendations, ensure_ascii=False, indent=2))
+        recommendations = ChatGPT_test.get_activity_recommendations(json.dumps(test_interests))
+        print(recommendations)
+        
+    except Exception as e:
+        print(f"Test failed: {str(e)}")
