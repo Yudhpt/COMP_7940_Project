@@ -8,12 +8,19 @@ import firebase_admin  # For Firebase
 from firebase_admin import credentials, firestore  # For Firestore
 from typing import List, Dict, Any
 
+from recommend import (
+    is_recommendation_request,
+    extract_interests_from_message,
+    search_activities_in_db,
+    get_activity_recommendations_from_gpt,
+    format_activities_for_response
+)
+
 class HKBU_ChatGPT():
-    def __init__(self, db=None):
+    def __init__(self, use_database: bool = True):
         """
         Initialize ChatGPT class
-        Get configuration from environment variables or config file
-        :param db: Firestore database instance (optional)
+        :param use_database: Whether to use Firebase database (default: True)
         """
         # Load configuration
         config = self._load_config()
@@ -24,20 +31,25 @@ class HKBU_ChatGPT():
         self.api_version = config['api_version']
         self.access_token = config['access_token']
         
-        # Set Firestore database instance
-        self.db = db
-        
-        # Validate required configurations
-        required_configs = [
-            'basic_url',
-            'model_name',
-            'api_version',
-            'access_token'
-        ]
-        
-        missing_configs = [config for config in required_configs if not getattr(self, config)]
-        if missing_configs:
-            raise ValueError(f"Missing required configurations: {', '.join(missing_configs)}")
+        # Initialize database if needed
+        self.db = None
+        if use_database:
+            try:
+                # Check if Firebase app is already initialized
+                if not firebase_admin._apps:
+                    # Initialize Firebase app
+                    cred = credentials.Certificate(config['firebase_config'])
+                    firebase_admin.initialize_app(cred)
+                    print("Firebase initialized successfully")
+                
+                # Get Firestore database instance
+                self.db = firestore.client()
+                print("Successfully connected to Firestore")
+                
+            except Exception as e:
+                print(f"Firebase initialization failed: {str(e)}")
+                print("Continuing without database support")
+                self.db = None
     
     def _load_config(self):
         """
@@ -50,11 +62,25 @@ class HKBU_ChatGPT():
             config.read('config.ini')
         
         # Get configuration, prioritize environment variables
+        firebase_config = {
+            "type": "service_account",
+            "project_id": os.getenv('FIREBASE_PROJECT_ID') or config.get('FIREBASE', 'PROJECT_ID', fallback=None),
+            "private_key_id": os.getenv('FIREBASE_PRIVATE_KEY_ID') or config.get('FIREBASE', 'PRIVATE_KEY_ID', fallback=None),
+            "private_key": (os.getenv('FIREBASE_PRIVATE_KEY') or config.get('FIREBASE', 'PRIVATE_KEY', fallback=None)).replace('\\n', '\n'),
+            "client_email": os.getenv('FIREBASE_CLIENT_EMAIL') or config.get('FIREBASE', 'CLIENT_EMAIL', fallback=None),
+            "client_id": os.getenv('FIREBASE_CLIENT_ID') or config.get('FIREBASE', 'CLIENT_ID', fallback=None),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": os.getenv('FIREBASE_CLIENT_CERT_URL') or config.get('FIREBASE', 'CLIENT_CERT_URL', fallback=None)
+        }
+        
         return {
             'basic_url': os.getenv('CHATGPT_BASIC_URL') or config.get('CHATGPT', 'BASICURL', fallback=None),
             'model_name': os.getenv('CHATGPT_MODEL_NAME') or config.get('CHATGPT', 'MODELNAME', fallback=None),
             'api_version': os.getenv('CHATGPT_API_VERSION') or config.get('CHATGPT', 'APIVERSION', fallback=None),
-            'access_token': os.getenv('CHATGPT_ACCESS_TOKEN') or config.get('CHATGPT', 'ACCESS_TOKEN', fallback=None)
+            'access_token': os.getenv('CHATGPT_ACCESS_TOKEN') or config.get('CHATGPT', 'ACCESS_TOKEN', fallback=None),
+            'firebase_config': firebase_config
         }
             
     def submit(self, message):
@@ -62,6 +88,46 @@ class HKBU_ChatGPT():
         Submit message to ChatGPT API and get reply
         :param message: User input message
         :return: ChatGPT reply or error message
+        """
+        # Check if this is a recommendation request
+        if is_recommendation_request(message):
+            return self.handle_recommendation_request(message)
+        
+        # Regular ChatGPT response
+        return self._get_chatgpt_response(message)
+    
+    def handle_recommendation_request(self, message: str) -> str:
+        """
+        Handle activity recommendation requests
+        :param message: User input message
+        :return: Response with activity recommendations
+        """
+        try:
+            # Extract interests from message
+            interests_data = extract_interests_from_message(message)
+            
+            # First try to find matching activities in database
+            if self.db:
+                matching_activities = search_activities_in_db(
+                    self.db,
+                    interests_data['interests'],
+                    interests_data['categories']
+                )
+                
+                if matching_activities:
+                    return format_activities_for_response(matching_activities)
+            
+            # If no matches found in database, use ChatGPT
+            return get_activity_recommendations_from_gpt(self, interests_data)
+        except Exception as e:
+            print(f"Error handling recommendation request: {str(e)}")
+            return "Sorry, there was an error processing your request. Please try again later."
+    
+    def _get_chatgpt_response(self, message: str) -> str:
+        """
+        Get response from ChatGPT API
+        :param message: User input message
+        :return: ChatGPT response
         """
         # Build conversation content
         conversation = [{"role": "user", "content": message}]
@@ -242,7 +308,7 @@ if __name__ == '__main__':
         test_db = firestore.client()
         
         # Initialize ChatGPT with database
-        ChatGPT_test = HKBU_ChatGPT(test_db)
+        ChatGPT_test = HKBU_ChatGPT(True)
         
         # Test basic conversation
         test_message = "Hello, how are you?"
@@ -251,26 +317,12 @@ if __name__ == '__main__':
         print(f"User: {test_message}")
         print(f"ChatGPT: {response}")
         
-        # Test activity search
-        print("\nTesting activity search:")
-        activities = ChatGPT_test.search_similar_activities(["gaming", "VR"])
-        print(f"Found {len(activities)} matching activities")
-        for activity in activities[:2]:  # Print first 2 activities
-            print(f"- {activity['name']}")
-        
         # Test activity recommendations
         print("\nTesting activity recommendations:")
-        test_interests = {
-            "name": "John",
-            "age": 25,
-            "interests": ["gaming", "VR", "social"],
-            "preferences": {
-                "online_activities": True,
-                "group_activities": True
-            }
-        }
-        recommendations = ChatGPT_test.get_activity_recommendations(json.dumps(test_interests))
-        print(recommendations)
+        test_recommendation = "I'm interested in gaming and VR. Can you recommend some activities?"
+        response = ChatGPT_test.submit(test_recommendation)
+        print(f"User: {test_recommendation}")
+        print(f"ChatGPT: {response}")
         
     except Exception as e:
         print(f"Test failed: {str(e)}")
