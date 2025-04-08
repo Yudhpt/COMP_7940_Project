@@ -60,3 +60,9 @@ Thumbs.db
 # 不忽略requirements.txt文件
 !requirements.txt
 
+# 只排除 azure.txt 文件
+azure.txt
+
+# 保留所有其他文件
+!*
+
